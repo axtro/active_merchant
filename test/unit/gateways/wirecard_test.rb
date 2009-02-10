@@ -1,6 +1,7 @@
 require File.dirname(__FILE__) + '/../../test_helper'
 
 class WirecardTest < Test::Unit::TestCase
+  TEST_PREAUTHORIZATION_GUWID = 'C857426123426699641202'
   TEST_AUTHORIZATION_GUWID = 'C822580121385121429927'
   
   def setup
@@ -17,6 +18,16 @@ class WirecardTest < Test::Unit::TestCase
       :description => 'Wirecard Purchase',
       :email => 'soleone@example.com'
     }
+  end
+  
+  def test_successful_preauthorization
+    @gateway.expects(:ssl_post).returns(successful_preauthorization_response)
+    assert response = @gateway.preauthorize(@amount, @credit_card, @options)
+    assert_instance_of Response, response
+
+    assert_success response
+    assert response.test?
+    assert_equal TEST_PREAUTHORIZATION_GUWID, response.authorization
   end
 
   def test_successful_authorization
@@ -60,8 +71,35 @@ class WirecardTest < Test::Unit::TestCase
     assert_failure response
     assert response.message["Could not find referenced transaction for GuWID 1234567890123456789012."]  
   end
-
+  
   private
+  
+  def successful_preauthorization_response
+    <<-XML
+    <?xml version="1.0" encoding="UTF-8"?>
+    <WIRECARD_BXML xmlns:xsi="http://www.w3.org/1999/XMLSchema-instance" xsi:noNamespaceSchemaLocation="wirecard.xsd">
+    	<W_RESPONSE>
+    		<W_JOB>
+    			<JobID></JobID>
+    			<FNC_CC_PREAUTHORIZATION>
+    				<FunctionID></FunctionID>
+    				<CC_TRANSACTION>
+    					<TransactionID>1</TransactionID>
+    					<PROCESSING_STATUS>
+    						<GuWID>C857426123426699641202</GuWID>
+    						<AuthorizationCode>691738</AuthorizationCode>
+    						<Info>THIS IS A DEMO TRANSACTION USING CREDIT CARD NUMBER 420000****0000. NO REAL MONEY WILL BE TRANSFERED.</Info>
+    						<StatusType>INFO</StatusType>
+    						<FunctionResult>ACK</FunctionResult>
+    						<TimeStamp>2009-02-10 12:56:36</TimeStamp>
+    					</PROCESSING_STATUS>
+    				</CC_TRANSACTION>
+    			</FNC_CC_PREAUTHORIZATION>
+    		</W_JOB>
+    	</W_RESPONSE>
+    </WIRECARD_BXML>
+    XML
+  end
 
   # Authorization success
   def successful_authorization_response

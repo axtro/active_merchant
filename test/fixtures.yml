@@ -314,4 +314,9 @@ viaklix:
 wirecard:
   login: 56500
   password: TestXAPTER
+
+# Working test credentials, no need to replace
+wirecard_recurring:
+  login: 56501
+  password: TestXAPTER
   

@@ -3,6 +3,9 @@ require 'base64'
 module ActiveMerchant #:nodoc:
   module Billing #:nodoc:
     class WirecardGateway < Gateway
+      # Set this to true to enable XML debug output.
+      attr_accessor :raw_xml_debug_output
+      
       # Test server location
       TEST_URL = 'https://c3-test.wirecard.com/secure/ssl-gateway'
      
@@ -16,13 +19,18 @@ module ActiveMerchant #:nodoc:
 				'xsi:noNamespaceSchemaLocation' => 'wirecard.xsd'
 			}
 
-			PERMITTED_TRANSACTIONS = %w[ AUTHORIZATION CAPTURE_AUTHORIZATION PURCHASE ]
+      PERMITTED_TRANSACTIONS = %w[ PREAUTHORIZATION AUTHORIZATION CAPTURE_AUTHORIZATION PURCHASE ]
+      TRANSACTIONS_WITH_AUTHORIZATION_RESPONSE = [ :preauthorization, :authorization, :purchase]
 
-      RETURN_CODES = %w[ ACK NOK ]
+      RETURN_CODES = %w[ ACK NOK PENDING ]
 
-      # The countries the gateway supports merchants from as 2 digit ISO country codes
-      # TODO: Check supported countries
-      self.supported_countries = ['DE']
+      # The countries the gateway supports merchants from as 2 digit ISO country codes.
+      # WireCard supports all countries in the European Union.
+      self.supported_countries = [
+        'AD', 'AT', 'BE', 'BG', 'CZ', 'CY', 'DK', 'EE', 'FI', 'FR',
+        'DE', 'GI', 'GR', 'HU', 'IS', 'IL', 'IE', 'IT', 'LV', 'LI',
+        'LT', 'LU', 'MT', 'MC', 'NL', 'NO', 'PL', 'PT', 'RO', 'SM',
+        'SK', 'SI', 'ES', 'SE', 'CH', 'TR', 'GB']
 
       # Wirecard supports all major credit and debit cards:
       # Visa, Mastercard, American Express, Diners Club,
@@ -49,7 +57,7 @@ module ActiveMerchant #:nodoc:
         requires!(options, :login, :password)
         # unfortunately Wirecard also requires a BusinessCaseSignature in the XML request
         requires!(options, :signature)
-        @options = options
+        @options = options.dup
         super
       end
 
@@ -57,11 +65,26 @@ module ActiveMerchant #:nodoc:
       def test?
         @options[:test] || super
       end
+      
+      # WireCard supports storing of credit card information on their servers. To do this, set the
+      # :recurring => "Initial" option in your first transaction and the :signature option to 56501 (batch booking 
+      # at acquirer Wirecard Bank).
+      # To use a saved credit card, set the :recurring => "Repeated" option and supply the authorization
+      # of the original transaction.
+      # If a repeated transaction doesn't contain the amount of money, the original amount of the first
+      # transaction is used. You can authorize, capture or purchase a different amount by simply
+      # supplying a different amount to the method call.
+      
+      # Preauthorization
+      def preauthorize(money, creditcard_or_recurring_authorization, options = {})
+        prepare_options_hash(options, creditcard_or_recurring_authorization)
+        request = build_request(:preauthorization, money, @options)
+        commit(request)
+      end
 
       # Authorization
-      def authorize(money, creditcard, options = {})
-        prepare_options_hash(options)
-        @options[:credit_card] = creditcard
+      def authorize(money, creditcard_or_recurring_authorization, options = {})
+        prepare_options_hash(options, creditcard_or_recurring_authorization)
         request = build_request(:authorization, money, @options)
         commit(request)
       end
@@ -69,24 +92,37 @@ module ActiveMerchant #:nodoc:
 
       # Capture Authorization
       def capture(money, authorization, options = {})
+        options[:authorization] = authorization
         prepare_options_hash(options)
-        @options[:authorization] = authorization
         request = build_request(:capture_authorization, money, @options)
         commit(request)
       end
 
 
       # Purchase
-      def purchase(money, creditcard, options = {})
-        prepare_options_hash(options)
-        @options[:credit_card] = creditcard
+      def purchase(money, creditcard_or_recurring_authorization, options = {})
+        prepare_options_hash(options, creditcard_or_recurring_authorization)
         request = build_request(:purchase, money, @options)
         commit(request)
       end
 
+      # TODO: What is the equivalent wirecard transaction type?
+      # def void(identification, options = {})
+      # end
+      
+      # TODO: What is the equivalent wirecard transaction type?
+      # def credit(money, identification, options = {})
+      # end
+      
     private
 
-      def prepare_options_hash(options)
+      def prepare_options_hash(options, creditcard_or_recurring_authorization = nil)
+        if creditcard_or_recurring_authorization.is_a?(String)
+          options[:authorization] = creditcard_or_recurring_authorization
+        elsif creditcard_or_recurring_authorization.is_a?(CreditCard)
+          options[:credit_card] = creditcard_or_recurring_authorization
+        end
+
         @options.update(options)
         setup_address_hash!(options)
       end
@@ -103,6 +139,11 @@ module ActiveMerchant #:nodoc:
       # Contact WireCard, make the XML request, and parse the
       # reply into a Response object
       def commit(request)
+        if raw_xml_debug_output
+          puts "+++RAW OUTGOING XML+++"
+          puts request
+          puts "+++RAW OUTGOING XML+++"
+        end
 	      headers = { 'Content-Type' => 'text/xml',
 	                  'Authorization' => encoded_credentials }
 
@@ -110,7 +151,7 @@ module ActiveMerchant #:nodoc:
         # Pending Status also means Acknowledged (as stated in their specification)
 	      success = response[:FunctionResult] == "ACK" || response[:FunctionResult] == "PENDING"
 	      message = response[:Message]
-        authorization = (success && @options[:action] == :authorization) ? response[:GuWID] : nil
+        authorization = (success && TRANSACTIONS_WITH_AUTHORIZATION_RESPONSE.include?(@options[:action])) ? response[:GuWID] : nil
 
         Response.new(success, message, response,
           :test => test?,
@@ -127,8 +168,9 @@ module ActiveMerchant #:nodoc:
 				xml.tag! 'WIRECARD_BXML' do
 				  xml.tag! 'W_REQUEST' do
           xml.tag! 'W_JOB' do
-              # TODO: OPTIONAL, check what value needs to be insert here
-              xml.tag! 'JobID', 'test dummy data'
+              # Merchants can store a unique token for this job inside the JobID tag. As we already put the :order_id into
+              # the TransactionID tag, leave this empty. WireCard docs state, that this field can be empty, but must be present.
+              xml.tag! 'JobID', ''
               # UserID for this transaction
               xml.tag! 'BusinessCaseSignature', options[:signature] || options[:login]
               # Create the whole rest of the message
@@ -147,35 +189,41 @@ module ActiveMerchant #:nodoc:
         transaction_type = action.to_s.upcase
 
         xml.tag! "FNC_CC_#{transaction_type}" do
-          # TODO: OPTIONAL, check which param should be used here
-          xml.tag! 'FunctionID', options[:description] || 'Test dummy FunctionID'
+          # Merchants can store a unique token for this function inside the FunctionID tag. As we already put the :order_id into
+          # the TransactionID tag, leave this empty. WireCard docs state, that this field can be empty, but must be present.
+          xml.tag! 'FunctionID', ''
 
           xml.tag! 'CC_TRANSACTION' do
             xml.tag! 'TransactionID', options[:order_id]
-            if [:authorization, :purchase].include?(action)
+            xml.tag! 'Usage', options[:description] # To be able to use this field it has to be ordered separately. Max length is 13 characters for VISA and Mastercard.
+            if TRANSACTIONS_WITH_AUTHORIZATION_RESPONSE.include?(action)
               add_invoice(xml, money, options)
               add_creditcard(xml, options[:credit_card])
               add_address(xml, options[:billing_address])
-            elsif action == :capture_authorization
-              xml.tag! 'GuWID', options[:authorization] if options[:authorization]
             end
+            add_recurring_info(xml, options)
+            add_customer_data(xml, options)
           end
         end
       end
 
-			# Includes the payment (amount, currency, country) to the transaction-xml
-      def add_invoice(xml, money, options)
-        xml.tag! 'Amount', amount(money)
-        xml.tag! 'Currency', options[:currency] || currency(money)
-        xml.tag! 'CountryCode', options[:billing_address][:country]
+      def add_recurring_info(xml, options)
+        xml.tag! 'GuWID', options[:authorization] if options[:authorization]
         xml.tag! 'RECURRING_TRANSACTION' do
           xml.tag! 'Type', options[:recurring] || 'Single'
         end
       end
+      
+			# Includes the payment (amount, currency, country) to the transaction-xml
+      def add_invoice(xml, money, options)
+        xml.tag!('Amount', amount(money)) if money
+        xml.tag!('Currency', options[:currency] || currency(money)) if money
+        xml.tag!('CountryCode', options[:billing_address][:country]) if options[:billing_address]
+      end
 
 			# Includes the credit-card data to the transaction-xml
 			def add_creditcard(xml, creditcard)
-        raise "Creditcard must be supplied!" if creditcard.nil?
+        return if creditcard.nil?
         xml.tag! 'CREDIT_CARD_DATA' do
           xml.tag! 'CreditCardNumber', creditcard.number
           xml.tag! 'CVC2', creditcard.verification_value
@@ -214,6 +262,11 @@ module ActiveMerchant #:nodoc:
       # Read the XML message from the gateway and check if it was successful,
 			# and also extract required return values from the response.
       def parse(xml)
+        if raw_xml_debug_output
+          puts "+++RAW INCOMING XML+++"
+          puts xml
+          puts "+++RAW INCOMING XML+++"
+        end
         basepath = '/WIRECARD_BXML/W_RESPONSE'
         response = {}
 

@@ -4,9 +4,12 @@ class RemoteWirecardTest < Test::Unit::TestCase
 
 
   def setup
-    test_account = fixtures(:wirecard)
-    test_account[:signature] = test_account[:login]
-    @gateway = WirecardGateway.new(test_account)
+    @test_account = fixtures(:wirecard)
+    @test_account[:signature] = @test_account[:login]
+    @gateway = WirecardGateway.new(@test_account)
+
+    @test_account_recurring = fixtures(:wirecard_recurring)
+    @test_account_recurring[:signature] = @test_account_recurring[:login]
 
     @amount = 100
     @credit_card = credit_card('4200000000000000')
@@ -21,6 +24,14 @@ class RemoteWirecardTest < Test::Unit::TestCase
   end
 
   # Success tested
+  def test_successful_preauthorization
+    assert response = @gateway.preauthorize(@amount, @credit_card, @options)
+    assert_success response
+    assert response.test?
+    assert response.message[/THIS IS A DEMO/]
+    assert response.authorization
+  end
+  
   def test_successful_authorization
     assert response = @gateway.authorize(@amount, @credit_card, @options)
     assert_success response
@@ -42,6 +53,27 @@ class RemoteWirecardTest < Test::Unit::TestCase
   def test_successful_purchase
     assert response = @gateway.purchase(@amount, @credit_card, @options)
     assert_success response
+    assert response.message[/THIS IS A DEMO/]
+  end
+  
+  def test_successful_recurring
+    gateway = WirecardGateway.new(@test_account_recurring)
+    assert initial_response = gateway.authorize(@amount, @credit_card, @options.merge({:recurring => "Initial"}))
+    assert_success initial_response
+    assert initial_response.test?
+    assert initial_response.authorization
+    assert initial_response.message[/THIS IS A DEMO/]
+
+    gateway = WirecardGateway.new(@test_account_recurring)
+    assert response = gateway.capture(@amount, initial_response.authorization, {:recurring => "Repeated"})
+    assert_success response
+    assert response.test?
+    assert response.message[/THIS IS A DEMO/]
+
+    gateway = WirecardGateway.new(@test_account_recurring)
+    assert response = gateway.purchase(5000, initial_response.authorization, {:recurring => "Repeated"})
+    assert_success response
+    assert response.test?
     assert response.message[/THIS IS A DEMO/]
   end
 
